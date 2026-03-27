@@ -81,9 +81,36 @@ import { TelegramChannel } from './channels/telegram.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { loadHotMemory } from './memory-tier-manager.js';
+import {
+  runDailyPromotionScan,
+  parsePromotionResponse,
+  handlePromotionResponse,
+} from './memory-promotion.js';
+import { processContainerOutput, createFlushRequestIpc } from './token-monitor.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+/** Resolve vault root from VAULT_PATH env var. Returns null if not configured. */
+function resolveVaultRoot(): string | null {
+  try {
+    const env = readEnvFile(['VAULT_PATH']);
+    const raw = env['VAULT_PATH'];
+    if (!raw) return null;
+    return raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : path.resolve(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Agent name derived from ASSISTANT_NAME (lowercased). */
+function getAgentName(): string {
+  return ASSISTANT_NAME.toLowerCase();
+}
+
+/** Last time the daily promotion scan ran (date string YYYY-MM-DD). */
+let lastPromotionScanDate = '';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -342,12 +369,31 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
+  // Wrap onOutput to track session ID from streamed results and monitor tokens
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
+        }
+        // Token monitoring: parse output for token counts, trigger flush at floor
+        if (output.result) {
+          const raw = typeof output.result === 'string' ? output.result : JSON.stringify(output.result);
+          const { threshold } = processContainerOutput(chatJid, raw);
+          if (threshold.shouldFlush) {
+            const vaultRoot = resolveVaultRoot();
+            if (vaultRoot) {
+              const flushReq = createFlushRequestIpc(chatJid);
+              logger.warn({ chatJid, tokensUsed: threshold.tokensUsed }, 'Token floor hit — pre-compaction flush requested');
+              // Write flush request to IPC so agent can respond with context summary
+              const ipcDir = path.join(process.cwd(), 'data', 'ipc', 'flush-requests');
+              fs.mkdirSync(ipcDir, { recursive: true });
+              fs.writeFileSync(
+                path.join(ipcDir, `${chatJid.replace(/[^a-z0-9]/gi, '_')}.json`),
+                JSON.stringify(flushReq),
+              );
+            }
+          }
         }
         await onOutput(output);
       }
@@ -518,6 +564,21 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+
+  // Log HOT memory state on startup
+  const vaultRootAtBoot = resolveVaultRoot();
+  if (vaultRootAtBoot) {
+    try {
+      const hot = loadHotMemory(vaultRootAtBoot, getAgentName());
+      logger.info(
+        { lineCount: hot.lineCount, vaultPath: hot.vaultPath },
+        'HOT memory loaded',
+      );
+    } catch (err) {
+      logger.warn({ err }, 'HOT memory not yet initialised — will create on first write');
+    }
+  }
+
   await runStartupValidator();
   loadState();
   restoreRemoteControl();
@@ -786,6 +847,22 @@ async function main(): Promise<void> {
           return;
         }
       }
+      // Check if this is a promotion response (YES/NO promo-xxx-xxxxxx)
+      // Only from main group, from user (not bot)
+      if (!msg.is_bot_message && registeredGroups[chatJid]?.isMain) {
+        const promoResponse = parsePromotionResponse(msg.content);
+        if (promoResponse) {
+          const vaultRoot = resolveVaultRoot();
+          if (vaultRoot) {
+            const ch = findChannel(channels, chatJid);
+            handlePromotionResponse(promoResponse.proposalId, promoResponse.accepted, vaultRoot)
+              .then((result) => ch?.sendMessage(chatJid, result.message))
+              .catch((err) => logger.error({ err }, 'Promotion response handler failed'));
+            return; // Do not pass to container
+          }
+        }
+      }
+
       storeMessage(msg);
     },
     onChatMetadata: (
@@ -845,6 +922,26 @@ async function main(): Promise<void> {
       });
     }
   }
+
+  // Daily promotion scan — runs at 08:00 local time, once per day
+  setInterval(() => {
+    const now = new Date();
+    const hh = now.getHours();
+    const today = now.toISOString().slice(0, 10);
+    if (hh === 8 && today !== lastPromotionScanDate) {
+      lastPromotionScanDate = today;
+      const vaultRoot = resolveVaultRoot();
+      if (!vaultRoot) return;
+      const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.isMain);
+      if (!mainEntry) return;
+      const [mainJid] = mainEntry;
+      const ch = findChannel(channels, mainJid);
+      if (!ch) return;
+      runDailyPromotionScan(vaultRoot, getAgentName(), ch, mainJid).catch((err) =>
+        logger.error({ err }, 'Daily promotion scan failed'),
+      );
+    }
+  }, 60_000); // check every minute
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

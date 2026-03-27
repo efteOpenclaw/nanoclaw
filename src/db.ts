@@ -146,6 +146,27 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* columns already exist */
   }
+
+  // Create embeddings table for semantic search (Track A)
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS embeddings (
+      id TEXT PRIMARY KEY,
+      vault_path TEXT NOT NULL UNIQUE,
+      content_hash TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      tier TEXT,
+      doc_type TEXT,
+      indexed_at TEXT NOT NULL
+    )
+  `);
+
+  // Indexes for common queries
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_embeddings_tier ON embeddings(tier)
+  `);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_embeddings_path ON embeddings(vault_path)
+  `);
 }
 
 export function initDatabase(): void {
@@ -716,4 +737,123 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// --- Embedding operations for Track A (SPEC-06) ---
+
+/** @internal - for embedding operations */
+export function getDb(): Database.Database {
+  return db;
+}
+
+export function storeEmbedding(
+  vaultPath: string,
+  contentHash: string,
+  embedding: Float32Array,
+  tier?: string,
+  docType?: string,
+): void {
+  const buffer = Buffer.from(embedding.buffer);
+
+  db.prepare(
+    `
+    INSERT INTO embeddings (id, vault_path, content_hash, embedding, tier, doc_type, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(vault_path) DO UPDATE SET
+      content_hash = excluded.content_hash,
+      embedding = excluded.embedding,
+      tier = excluded.tier,
+      doc_type = excluded.doc_type,
+      indexed_at = excluded.indexed_at
+  `,
+  ).run(
+    crypto.randomUUID(),
+    vaultPath,
+    contentHash,
+    buffer,
+    tier || null,
+    docType || null,
+    new Date().toISOString(),
+  );
+}
+
+export function getEmbedding(vaultPath: string): Float32Array | null {
+  const row = db
+    .prepare('SELECT embedding FROM embeddings WHERE vault_path = ?')
+    .get(vaultPath) as { embedding: Buffer } | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return new Float32Array(row.embedding.buffer, row.embedding.byteOffset, 384);
+}
+
+export function deleteEmbedding(vaultPath: string): void {
+  db.prepare('DELETE FROM embeddings WHERE vault_path = ?').run(vaultPath);
+}
+
+export function getIndexedCount(): number {
+  const row = db.prepare('SELECT COUNT(*) as count FROM embeddings').get() as {
+    count: number;
+  };
+  return row.count;
+}
+
+export function clearEmbeddings(): void {
+  db.prepare('DELETE FROM embeddings').run();
+}
+
+export function searchSimilarEmbeddings(
+  queryEmbedding: Float32Array,
+  topK: number = 5,
+  tier?: string[],
+  minSimilarity: number = 0.7,
+): Array<{ vault_path: string; similarity: number; tier: string | null }> {
+  let query = 'SELECT vault_path, embedding, tier FROM embeddings';
+  const params: (string | string[])[] = [];
+
+  if (tier && tier.length > 0) {
+    query += ` WHERE tier IN (${tier.map(() => '?').join(',')})`;
+    params.push(...tier);
+  }
+
+  const rows = db.prepare(query).all(...params) as Array<{
+    vault_path: string;
+    embedding: Buffer;
+    tier: string | null;
+  }>;
+
+  const results = rows.map((row) => {
+    const embedding = new Float32Array(
+      row.embedding.buffer,
+      row.embedding.byteOffset,
+      384,
+    );
+    const similarity = cosineSimilarity(queryEmbedding, embedding);
+    return {
+      vault_path: row.vault_path,
+      similarity,
+      tier: row.tier,
+    };
+  });
+
+  return results
+    .filter((r) => r.similarity >= minSimilarity)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, topK);
+}
+
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
