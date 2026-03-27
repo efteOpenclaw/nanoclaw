@@ -104,8 +104,39 @@ export interface Channel {
   syncGroups?(force: boolean): Promise<void>;
   // Optional: send a message with an inline button keyboard.
   // rows[i][j] = button at row i, column j.
-  sendWithKeyboard?(jid: string, text: string, rows: InlineKeyboardButton[][]): Promise<void>;
+  sendWithKeyboard?(
+    jid: string,
+    text: string,
+    rows: InlineKeyboardButton[][],
+  ): Promise<void>;
 }
+
+// --- Vault write queue (SPEC-04/SPEC-15) ---
+
+export type VaultWritePriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+export interface VaultWriteRequest {
+  id: string;
+  priority: VaultWritePriority;
+  /** Relative to VAULT_PATH — e.g. "agent/okti/hot-memory.md" */
+  path: string;
+  content: string;
+  mode: 'overwrite' | 'append';
+  /** Human-readable source — e.g. "host:startup", "ipc:main" */
+  source: string;
+  requestedAt: Date;
+  /** Defaults to "vault: write {path}" */
+  commitMessage?: string;
+}
+
+export interface VaultWriteDeadLetterEntry {
+  request: VaultWriteRequest;
+  error: string;
+  failedAt: Date;
+  attempts: number;
+}
+
+// --- Callback types ---
 
 // Callback type that channels use to deliver inbound messages
 export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;

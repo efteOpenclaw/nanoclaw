@@ -45,6 +45,55 @@ One group is designated the *main hub* (`isMain: true`). It has elevated privile
 
 When a feature is not available on the current platform, adapt gracefully — offer a numbered list instead of buttons, plain text instead of a formatted link.
 
+## Vault Writes
+
+To write to the Obsidian vault, drop a JSON file into `/workspace/ipc/vault-writes/{uuid}.json`. The host picks it up within 1s, writes the file, git-commits, and git-pushes. No direct filesystem access to the vault is available from inside the container.
+
+**Request schema:**
+
+```json
+{
+  "path": "agent/okti/hot-memory.md",
+  "content": "# content here\n",
+  "mode": "overwrite",
+  "priority": "P1",
+  "commitMessage": "mem: update hot memory"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `path` | yes | Relative to vault root — no `..`, no absolute paths |
+| `content` | yes | String content to write |
+| `mode` | yes | `overwrite` or `append` |
+| `priority` | no | P0–P3, defaults to P2 |
+| `commitMessage` | no | Defaults to `vault: write {path}` |
+
+**Priority guidance:**
+
+| Priority | Use for |
+|---|---|
+| P0 | Critical system writes, emergency logs |
+| P1 | Agent memory updates, corrections log entries |
+| P2 | KB, calendar, task updates |
+| P3 | Routine logs, low-priority notes |
+
+**Protected paths (append-only — `overwrite` is rejected):**
+- `system/invariants.md`
+- `agent/*/self-improving/corrections.md`
+- `evolution/changelog.md`
+
+**Quick example (bash inside container):**
+
+```bash
+echo '{
+  "path": "agent/okti/self-improving/corrections.md",
+  "content": "\n## 2026-03-27 — example correction\nWhat happened...\n",
+  "mode": "append",
+  "priority": "P1"
+}' > /workspace/ipc/vault-writes/$(uuidgen).json
+```
+
 ## What You Can Do
 
 - Answer questions and have conversations

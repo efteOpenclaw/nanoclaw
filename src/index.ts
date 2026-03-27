@@ -515,7 +515,7 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
-  runStartupValidator();
+  await runStartupValidator();
   loadState();
   restoreRemoteControl();
 
@@ -549,7 +549,10 @@ async function main(): Promise<void> {
       if (result.ok) {
         await channel.sendMessage(chatJid, result.url);
       } else {
-        await channel.sendMessage(chatJid, `Remote Control failed: ${result.error}`);
+        await channel.sendMessage(
+          chatJid,
+          `Remote Control failed: ${result.error}`,
+        );
       }
     },
   });
@@ -570,7 +573,10 @@ async function main(): Promise<void> {
   registerCommand('/help', {
     description: 'List all host-side slash commands handled by nanoclaw.',
     handle: async ({ chatJid, channel }) => {
-      await channel.sendMessage(chatJid, `Host-side commands:\n${listCommands()}`);
+      await channel.sendMessage(
+        chatJid,
+        `Host-side commands:\n${listCommands()}`,
+      );
     },
   });
 
@@ -595,7 +601,9 @@ async function main(): Promise<void> {
       } else {
         // Text fallback for channels without keyboard support
         const list = models
-          .map((m, i) => `${i + 1}. ${m === activeModel ? `*${m}* (active)` : m}`)
+          .map(
+            (m, i) => `${i + 1}. ${m === activeModel ? `*${m}* (active)` : m}`,
+          )
           .join('\n');
         await channel.sendMessage(chatJid, `${header}\n\n${list}`);
       }
@@ -614,8 +622,18 @@ async function main(): Promise<void> {
           const group = registeredGroups[chatJid];
           const channel = findChannel(channels, chatJid);
           if (channel) {
-            dispatchSlashCommand({ command, args, chatJid, msg, group, channel }).catch((err) =>
-              logger.error({ err, chatJid, command }, 'slash-command dispatch error'),
+            dispatchSlashCommand({
+              command,
+              args,
+              chatJid,
+              msg,
+              group,
+              channel,
+            }).catch((err) =>
+              logger.error(
+                { err, chatJid, command },
+                'slash-command dispatch error',
+              ),
             );
           }
           return;
@@ -686,8 +704,11 @@ async function main(): Promise<void> {
           setGroupModel(group.folder, model);
           answer(`Switched to ${model}`).catch(() => {});
           // Also send a message so there's a visible confirmation in chat
-          ch.sendMessage(chatJid, `Model switched to \`${model}\`. Takes effect on the next message.`).catch(
-            (err) => logger.error({ err }, 'Failed to send model-switch confirmation'),
+          ch.sendMessage(
+            chatJid,
+            `Model switched to \`${model}\`. Takes effect on the next message.`,
+          ).catch((err) =>
+            logger.error({ err }, 'Failed to send model-switch confirmation'),
           );
         } else {
           answer().catch(() => {});

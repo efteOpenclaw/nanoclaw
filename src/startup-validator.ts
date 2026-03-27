@@ -4,23 +4,29 @@
  * Runs after initDatabase(), before loadState() in main().
  * On any failed invariant: logs FATAL and calls process.exit(1).
  * On config checksum change: logs WARN and updates stored checksum.
+ * On vault git check failure: logs WARN only (degrades to local-only writes).
  *
- * Four checks (all must pass):
+ * Five checks:
  * 1. Log sink working
  * 2. Vault accessible (VAULT_PATH env var)
  * 3. Config valid + checksummed (ASSISTANT_NAME, ANTHROPIC_API_KEY, ANTHROPIC_MODEL)
  * 4. Rule registry exists at {VAULT_PATH}/system/rule-registry.md
+ * 5. Vault write queue operable (git remote configured, repo valid)
  */
 import crypto from 'crypto';
+import { exec } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 import { readEnvFile } from './env.js';
 import { getRouterState, setRouterState } from './db.js';
 import { logger } from './logger.js';
 
-export function runStartupValidator(): void {
+export async function runStartupValidator(): Promise<void> {
   // Check 1: Log sink working
   try {
     logger.info('startup-validator: checking invariants');
@@ -61,7 +67,11 @@ export function runStartupValidator(): void {
   logger.info({ vaultPath: resolvedVault }, 'startup-validator: vault OK');
 
   // Check 3: Config valid + checksummed
-  const requiredKeys = ['ASSISTANT_NAME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
+  const requiredKeys = [
+    'ASSISTANT_NAME',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_MODEL',
+  ];
   const missing = requiredKeys.filter((k) => !env[k]);
   if (missing.length > 0) {
     logger.fatal(
@@ -88,7 +98,11 @@ export function runStartupValidator(): void {
   );
 
   // Check 4: Rule registry exists (SPEC-14 full impl later; existence only)
-  const ruleRegistryPath = path.join(resolvedVault, 'system', 'rule-registry.md');
+  const ruleRegistryPath = path.join(
+    resolvedVault,
+    'system',
+    'rule-registry.md',
+  );
   if (!fs.existsSync(ruleRegistryPath)) {
     logger.fatal(
       { path: ruleRegistryPath },
@@ -97,6 +111,18 @@ export function runStartupValidator(): void {
     process.exit(1);
   }
   logger.info('startup-validator: rule registry OK');
+
+  // Check 5: Vault write queue operable (WARN only — degrades gracefully)
+  try {
+    await execAsync(`git -C "${resolvedVault}" remote get-url origin`);
+    await execAsync(`git -C "${resolvedVault}" status`);
+    logger.info('startup-validator: vault git remote OK');
+  } catch (err) {
+    logger.warn(
+      { err },
+      'startup-validator: vault git remote not configured — vault writes will be local-only',
+    );
+  }
 
   logger.info('startup-validator: all invariants satisfied');
 }

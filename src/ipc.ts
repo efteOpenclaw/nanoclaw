@@ -8,7 +8,8 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, VaultWritePriority } from './types.js';
+import { vaultWriteQueue } from './vault-write-queue.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -144,6 +145,34 @@ export function startIpcWatcher(deps: IpcDeps): void {
         }
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
+      }
+
+      // Process vault write requests from this group's IPC directory
+      const vaultWritesDir = path.join(ipcBaseDir, sourceGroup, 'vault-writes');
+      try {
+        if (fs.existsSync(vaultWritesDir)) {
+          const writeFiles = fs
+            .readdirSync(vaultWritesDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of writeFiles) {
+            const filePath = path.join(vaultWritesDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              processVaultWriteIpc(data, sourceGroup);
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC vault write',
+              );
+              const deadLetterDir = path.join(vaultWritesDir, 'dead-letter');
+              fs.mkdirSync(deadLetterDir, { recursive: true });
+              fs.renameSync(filePath, path.join(deadLetterDir, file));
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'Error reading IPC vault-writes directory');
       }
     }
 
@@ -461,4 +490,39 @@ export async function processTaskIpc(
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
+}
+
+const VALID_PRIORITIES = new Set<string>(['P0', 'P1', 'P2', 'P3']);
+const VALID_MODES = new Set<string>(['overwrite', 'append']);
+
+function processVaultWriteIpc(
+  data: Record<string, unknown>,
+  sourceGroup: string,
+): void {
+  const { path: relPath, content, mode, priority, commitMessage } = data;
+
+  if (typeof relPath !== 'string' || !relPath) {
+    logger.warn({ sourceGroup, data }, 'vault-write IPC: missing or invalid path');
+    return;
+  }
+  if (typeof content !== 'string') {
+    logger.warn({ sourceGroup, relPath }, 'vault-write IPC: content must be a string');
+    return;
+  }
+  if (typeof mode !== 'string' || !VALID_MODES.has(mode)) {
+    logger.warn({ sourceGroup, relPath, mode }, 'vault-write IPC: invalid mode');
+    return;
+  }
+  const p = typeof priority === 'string' && VALID_PRIORITIES.has(priority)
+    ? (priority as VaultWritePriority)
+    : 'P2';
+
+  vaultWriteQueue.enqueue({
+    priority: p,
+    path: relPath,
+    content,
+    mode: mode as 'overwrite' | 'append',
+    source: `ipc:${sourceGroup}`,
+    commitMessage: typeof commitMessage === 'string' ? commitMessage : undefined,
+  });
 }
