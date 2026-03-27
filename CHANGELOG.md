@@ -2,7 +2,24 @@
 
 All notable changes to NanoClaw will be documented in this file.
 
-For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
+For upstream release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
+
+---
+
+## [Okti fork] - 2026-03-27
+
+Changes in this fork on top of v1.2.36:
+
+- **Native credential proxy** (`src/credential-proxy.ts`): replaces OneCLI Agent Vault. Reads `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` from `.env` and injects into container API requests. No OneCLI dependency.
+- **Startup validator** (`src/startup-validator.ts`): 4 invariant checks on boot — log sink, vault path, config checksum, rule registry. Process exits with code 1 if any fail.
+- **Slash command registry** (`src/slash-commands.ts`): host-side command framework. Unknown commands pass through to the container. Built-in: `/help`, `/models`, `/remote-control`, `/remote-control-end`.
+- **Model switcher** (`src/model-switcher.ts`): per-group model switching via Telegram inline keyboard. Active model persisted in `data/sessions/{folder}/.claude/settings.json`. Callback namespace: `okti:model:{name}`.
+- **Telegram inline keyboard support**: `sendWithKeyboard` and `setCallbackQueryHandler` added to `TelegramChannel`.
+- **Multi-platform agent context**: `groups/global/CLAUDE.md` and `groups/main/CLAUDE.md` include a NanoClaw system block — platform detection via folder prefix, main hub concept, per-platform capability and restriction table.
+- **Portable install**: `install.sh` supports raw (`bash install.sh`) and personal (`bash install.sh --personal`) modes. `.env.example` updated with all supported variables.
+- **Two-repo setup**: raw public fork at `efteOpenclaw/nanoclaw`, personal config overlay at `efteOpenclaw/nanoclaw-personal` (private).
+
+---
 
 ## [1.2.35] - 2026-03-26
 

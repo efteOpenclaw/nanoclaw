@@ -25,23 +25,35 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 
 ## Quick Start
 
+**Raw install** — base system, no personal config:
+
 ```bash
-gh repo fork qwibitai/nanoclaw --clone
-cd nanoclaw
-claude
+curl -sL https://raw.githubusercontent.com/efteOpenclaw/nanoclaw/main/install.sh | bash
+cd ~/nanoclaw
 ```
 
-<details>
-<summary>Without GitHub CLI</summary>
+**Personal install** — pulls your private config overlay on top:
 
-1. Fork [qwibitai/nanoclaw](https://github.com/qwibitai/nanoclaw) on GitHub (click the Fork button)
-2. `git clone https://github.com/<your-username>/nanoclaw.git`
-3. `cd nanoclaw`
-4. `claude`
+```bash
+curl -sL https://raw.githubusercontent.com/efteOpenclaw/nanoclaw/main/install.sh | bash -s -- --personal
+cd ~/nanoclaw
+```
+
+Both modes: edit `.env` to set your bot token and API credentials, then `npm run dev`.
+
+<details>
+<summary>Manual setup (without the installer)</summary>
+
+```bash
+git clone https://github.com/efteOpenclaw/nanoclaw.git
+cd nanoclaw
+npm install
+npm run build
+cp .env.example .env   # then fill in your values
+npm run dev
+```
 
 </details>
-
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup and service configuration.
 
 > **Note:** Commands prefixed with `/` (like `/setup`, `/add-whatsapp`) are [Claude Code skills](https://code.claude.com/docs/en/skills). Type them inside the `claude` CLI prompt, not in your regular terminal. If you don't have Claude Code installed, get it at [claude.com/product/claude-code](https://claude.com/product/claude-code).
 
@@ -72,7 +84,9 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
 - **Web access** - Search and fetch content from the Web
 - **Container isolation** - Agents are sandboxed in Docker (macOS/Linux), [Docker Sandboxes](docs/docker-sandboxes.md) (micro VM isolation), or Apple Container (macOS)
-- **Credential security** - Agents never hold raw API keys. Outbound requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects credentials at request time and enforces per-agent policies and rate limits.
+- **Credential security** - Agents never hold raw API keys. Outbound requests route through a native credential proxy (`src/credential-proxy.ts`) which injects the API key and base URL from `.env` at request time — no OneCLI dependency required.
+- **Model switching** - Switch the active model per group at runtime via `/models` — shows available models as a tap-to-select keyboard. State persists per group across restarts.
+- **Boot validation** - Startup validator checks 4 invariants on every boot (log sink, vault path, config checksum, rule registry) and exits early with a clear error rather than failing silently later.
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks
 - **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
 
@@ -141,13 +155,17 @@ For the full architecture details, see the [documentation site](https://docs.nan
 Key files:
 - `src/index.ts` - Orchestrator: state, message loop, agent invocation
 - `src/channels/registry.ts` - Channel registry (self-registration at startup)
+- `src/credential-proxy.ts` - Native HTTP credential proxy (replaces OneCLI)
+- `src/startup-validator.ts` - Boot invariant checks
+- `src/slash-commands.ts` - Host-side slash command registry
+- `src/model-switcher.ts` - Per-group model switching and discovery
 - `src/ipc.ts` - IPC watcher and task processing
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
 - `src/container-runner.ts` - Spawns streaming agent containers
 - `src/task-scheduler.ts` - Runs scheduled tasks
 - `src/db.ts` - SQLite operations (messages, groups, sessions, state)
-- `groups/*/CLAUDE.md` - Per-group memory
+- `groups/*/CLAUDE.md` - Per-group agent instructions and memory
 
 ## FAQ
 
@@ -161,7 +179,7 @@ Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via W
 
 **Is this secure?**
 
-Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Credentials never enter the container — outbound API requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects authentication at the proxy level and supports rate limits and access policies. You should still review what you're running, but the codebase is small enough that you actually can. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
+Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Credentials never enter the container — outbound API requests route through the native credential proxy (`src/credential-proxy.ts`), which injects authentication from `.env` at the proxy level. You should still review what you're running, but the codebase is small enough that you actually can. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
 
 **Why no configuration files?**
 
