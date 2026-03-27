@@ -616,7 +616,8 @@ async function main(): Promise<void> {
   const execAsync = promisify(exec);
 
   registerCommand('/build', {
-    description: 'Start an autonomous build session — clones nanoclaw-work, implements next spec item, commits and pushes.',
+    description:
+      'Start an autonomous build session — clones nanoclaw-work, implements next spec item, commits and pushes.',
     mainOnly: true,
     handle: async ({ chatJid, channel }) => {
       await channel.sendMessage(
@@ -647,13 +648,20 @@ async function main(): Promise<void> {
         await execAsync(`git -C ${workDir} checkout -b ${branchName}`);
 
         // Check for implementation status
-        const implStatusPath = path.join(workDir, 'nanoclaw-personal', 'docs', 'implementation-status.md');
+        const implStatusPath = path.join(
+          workDir,
+          'nanoclaw-personal',
+          'docs',
+          'implementation-status.md',
+        );
         let statusPreview = '';
         if (fs.existsSync(implStatusPath)) {
           const content = fs.readFileSync(implStatusPath, 'utf-8');
           // Extract the "Next" section or first 20 lines
           const lines = content.split('\n');
-          const nextIdx = lines.findIndex(l => l.toLowerCase().includes('next:'));
+          const nextIdx = lines.findIndex((l) =>
+            l.toLowerCase().includes('next:'),
+          );
           if (nextIdx >= 0) {
             statusPreview = lines.slice(nextIdx, nextIdx + 5).join('\n');
           }
@@ -661,16 +669,25 @@ async function main(): Promise<void> {
 
         // Install dependencies
         await channel.sendMessage(chatJid, 'Installing dependencies...');
-        const { stdout: npmOut, stderr: npmErr } = await execAsync('npm install', { cwd: workDir });
+        const { stdout: npmOut, stderr: npmErr } = await execAsync(
+          'npm install',
+          { cwd: workDir },
+        );
         logger.debug({ npmOut, npmErr }, 'npm install output');
 
         // Build
         await channel.sendMessage(chatJid, 'Running npm run build...');
-        const { stdout: buildOut, stderr: buildErr } = await execAsync('npm run build', { cwd: workDir });
+        const { stdout: buildOut, stderr: buildErr } = await execAsync(
+          'npm run build',
+          { cwd: workDir },
+        );
         logger.debug({ buildOut, buildErr }, 'npm build output');
 
         // Commit and push (even if empty, to establish branch)
-        await channel.sendMessage(chatJid, 'Committing and pushing to origin...');
+        await channel.sendMessage(
+          chatJid,
+          'Committing and pushing to origin...',
+        );
         await execAsync(`git -C ${workDir} add -A`);
         await execAsync(
           `git -C ${workDir} -c user.email="okti@nanoclaw.local" -c user.name="Okti" commit -m "build: autonomous session ${branchName}" || true`,
@@ -692,7 +709,14 @@ async function main(): Promise<void> {
         await channel.sendMessage(chatJid, msg);
 
         // Write to vault via IPC for tracking
-        const ipcDir = path.join(os.homedir(), 'nanoclaw', 'data', 'ipc', 'main', 'vault-writes');
+        const ipcDir = path.join(
+          os.homedir(),
+          'nanoclaw',
+          'data',
+          'ipc',
+          'main',
+          'vault-writes',
+        );
         if (!fs.existsSync(ipcDir)) {
           fs.mkdirSync(ipcDir, { recursive: true });
         }
@@ -705,7 +729,6 @@ async function main(): Promise<void> {
         };
         const ipcFile = path.join(ipcDir, `${crypto.randomUUID()}.json`);
         fs.writeFileSync(ipcFile, JSON.stringify(ipcPayload, null, 2));
-
       } catch (err) {
         logger.error({ err }, 'autonomous build failed');
         await channel.sendMessage(
