@@ -1,16 +1,25 @@
 import https from 'https';
-import { Api, Bot } from 'grammy';
+import { Api, Bot, InlineKeyboard } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
+  CallbackAnswerFn,
   Channel,
+  InlineKeyboardButton,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+export type TelegramCallbackQueryHandler = (
+  chatJid: string,
+  sender: string,
+  data: string,
+  answer: CallbackAnswerFn,
+) => void;
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -47,10 +56,20 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private callbackQueryHandler: TelegramCallbackQueryHandler | null = null;
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
     this.opts = opts;
+  }
+
+  /**
+   * Register a handler for Telegram callback queries (inline button presses).
+   * Only one handler is supported — call this before the first button is sent.
+   * The handler is responsible for routing by inspecting the `data` string.
+   */
+  setCallbackQueryHandler(handler: TelegramCallbackQueryHandler): void {
+    this.callbackQueryHandler = handler;
   }
 
   async connect(): Promise<void> {
@@ -216,6 +235,25 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
+    // Handle inline keyboard button presses
+    this.bot.on('callback_query:data', async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      const chatJid = `tg:${ctx.callbackQuery.message?.chat.id}`;
+      const sender = ctx.from?.id.toString() ?? '';
+
+      const answer: CallbackAnswerFn = async (toast?: string) => {
+        await ctx.answerCallbackQuery({ text: toast }).catch((err) =>
+          logger.debug({ err }, 'Failed to answer callback query'),
+        );
+      };
+
+      if (this.callbackQueryHandler) {
+        this.callbackQueryHandler(chatJid, sender, data, answer);
+      } else {
+        await answer();
+      }
+    });
+
     // Handle errors gracefully
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
@@ -275,6 +313,34 @@ export class TelegramChannel implements Channel {
       );
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async sendWithKeyboard(
+    jid: string,
+    text: string,
+    rows: InlineKeyboardButton[][],
+  ): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+    try {
+      const keyboard = new InlineKeyboard();
+      for (let r = 0; r < rows.length; r++) {
+        if (r > 0) keyboard.row();
+        for (const btn of rows[r]) {
+          keyboard.text(btn.label, btn.callbackData);
+        }
+      }
+      const numericId = jid.replace(/^tg:/, '');
+      await this.bot.api.sendMessage(numericId, text, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard,
+      });
+      logger.info({ jid, buttons: rows.flat().length }, 'Telegram keyboard message sent');
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Telegram keyboard message');
     }
   }
 

@@ -79,6 +79,16 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Inline keyboard ---
+
+export interface InlineKeyboardButton {
+  label: string;
+  /** Opaque string returned in callback_query when the button is pressed. */
+  callbackData: string;
+}
+
+export type CallbackAnswerFn = (toast?: string) => Promise<void>;
+
 // --- Channel abstraction ---
 
 export interface Channel {
@@ -92,6 +102,9 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: send a message with an inline button keyboard.
+  // rows[i][j] = button at row i, column j.
+  sendWithKeyboard?(jid: string, text: string, rows: InlineKeyboardButton[][]): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

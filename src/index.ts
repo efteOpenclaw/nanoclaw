@@ -17,6 +17,7 @@ import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
+import { runStartupValidator } from './startup-validator.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -44,6 +45,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -58,6 +60,21 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import {
+  dispatchSlashCommand,
+  isHostCommand,
+  isSlashCommand,
+  listCommands,
+  parseSlashCommand,
+  registerCommand,
+} from './slash-commands.js';
+import {
+  buildModelButtons,
+  fetchAvailableModels,
+  getGroupModel,
+  setGroupModel,
+} from './model-switcher.js';
+import { TelegramChannel } from './channels/telegram.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -133,7 +150,6 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
       logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
     }
   }
-
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -499,6 +515,7 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
+  runStartupValidator();
   loadState();
   restoreRemoteControl();
 
@@ -519,58 +536,91 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Handle /remote-control and /remote-control-end commands
-  async function handleRemoteControl(
-    command: string,
-    chatJid: string,
-    msg: NewMessage,
-  ): Promise<void> {
-    const group = registeredGroups[chatJid];
-    if (!group?.isMain) {
-      logger.warn(
-        { chatJid, sender: msg.sender },
-        'Remote control rejected: not main group',
-      );
-      return;
-    }
-
-    const channel = findChannel(channels, chatJid);
-    if (!channel) return;
-
-    if (command === '/remote-control') {
+  // Register host-side slash commands
+  registerCommand('/remote-control', {
+    description: 'Start a Claude remote control session and return the URL.',
+    mainOnly: true,
+    handle: async ({ chatJid, channel }) => {
       const result = await startRemoteControl(
-        msg.sender,
+        channel.name,
         chatJid,
         process.cwd(),
       );
       if (result.ok) {
         await channel.sendMessage(chatJid, result.url);
       } else {
-        await channel.sendMessage(
-          chatJid,
-          `Remote Control failed: ${result.error}`,
-        );
+        await channel.sendMessage(chatJid, `Remote Control failed: ${result.error}`);
       }
-    } else {
+    },
+  });
+
+  registerCommand('/remote-control-end', {
+    description: 'Stop the active Claude remote control session.',
+    mainOnly: true,
+    handle: async ({ chatJid, channel }) => {
       const result = stopRemoteControl();
       if (result.ok) {
         await channel.sendMessage(chatJid, 'Remote Control session ended.');
       } else {
         await channel.sendMessage(chatJid, result.error);
       }
-    }
-  }
+    },
+  });
+
+  registerCommand('/help', {
+    description: 'List all host-side slash commands handled by nanoclaw.',
+    handle: async ({ chatJid, channel }) => {
+      await channel.sendMessage(chatJid, `Host-side commands:\n${listCommands()}`);
+    },
+  });
+
+  registerCommand('/models', {
+    description: 'List available models. Click a button to switch.',
+    handle: async ({ chatJid, group, channel }) => {
+      const { ANTHROPIC_BASE_URL } = readEnvFile(['ANTHROPIC_BASE_URL']);
+      const baseUrl = ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1';
+      const models = await fetchAvailableModels(baseUrl);
+      if (models.length === 0) {
+        await channel.sendMessage(
+          chatJid,
+          'No models returned from the API. Check ANTHROPIC_BASE_URL in .env.',
+        );
+        return;
+      }
+      const activeModel = group ? getGroupModel(group.folder) : 'unknown';
+      const rows = buildModelButtons(models, activeModel);
+      const header = `*Available models* (active: \`${activeModel}\`)\nTap one to switch:`;
+      if (channel.sendWithKeyboard) {
+        await channel.sendWithKeyboard(chatJid, header, rows);
+      } else {
+        // Text fallback for channels without keyboard support
+        const list = models
+          .map((m, i) => `${i + 1}. ${m === activeModel ? `*${m}* (active)` : m}`)
+          .join('\n');
+        await channel.sendMessage(chatJid, `${header}\n\n${list}`);
+      }
+    },
+  });
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
-      // Remote control commands — intercept before storage
+      // Slash command interception — host-side commands are handled here;
+      // unrecognised slash commands pass through to the container (Claude Code handles them).
       const trimmed = msg.content.trim();
-      if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
-        handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
-          logger.error({ err, chatJid }, 'Remote control command error'),
-        );
-        return;
+      if (isSlashCommand(trimmed)) {
+        const { command, args } = parseSlashCommand(trimmed);
+        if (isHostCommand(command)) {
+          const group = registeredGroups[chatJid];
+          const channel = findChannel(channels, chatJid);
+          if (channel) {
+            dispatchSlashCommand({ command, args, chatJid, msg, group, channel }).catch((err) =>
+              logger.error({ err, chatJid, command }, 'slash-command dispatch error'),
+            );
+          }
+          return;
+        }
+        // Unknown slash command — fall through to storeMessage so container handles it.
       }
 
       // Sender allowlist drop mode: discard messages from denied senders before storing
@@ -620,6 +670,30 @@ async function main(): Promise<void> {
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
+  }
+
+  // Wire callback query handler for Telegram inline keyboards
+  for (const ch of channels) {
+    if (ch instanceof TelegramChannel) {
+      ch.setCallbackQueryHandler((chatJid, _sender, data, answer) => {
+        if (data.startsWith('okti:model:')) {
+          const model = data.slice('okti:model:'.length);
+          const group = registeredGroups[chatJid];
+          if (!group) {
+            answer('Group not registered').catch(() => {});
+            return;
+          }
+          setGroupModel(group.folder, model);
+          answer(`Switched to ${model}`).catch(() => {});
+          // Also send a message so there's a visible confirmation in chat
+          ch.sendMessage(chatJid, `Model switched to \`${model}\`. Takes effect on the next message.`).catch(
+            (err) => logger.error({ err }, 'Failed to send model-switch confirmation'),
+          );
+        } else {
+          answer().catch(() => {});
+        }
+      });
+    }
   }
 
   // Start subsystems (independently of connection handler)
