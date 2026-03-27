@@ -404,3 +404,93 @@ If a user wants tasks running more than ~2x daily and a script can't reduce agen
 - Suggest restructuring with a script that checks the condition first
 - If the user needs an LLM to evaluate data, suggest using an API key with direct Anthropic API calls inside the script
 - Help the user find the minimum viable frequency
+
+---
+
+## Autonomous Build Mode
+
+You can continue building the Okti system on your own — reading the spec, implementing the next item, pushing a branch, and notifying the user via Telegram. Use this when the user asks you to "continue building", "work on the spec", or schedules you to do so overnight.
+
+### What you have access to
+
+| Path | Access | Contents |
+|---|---|---|
+| `/workspace/extra/vault/` | read-only | Spec, implementation-status, agent memory, kb |
+| `/workspace/extra/work/` | read-write | Isolated clone workspace — your build sandbox |
+| `/workspace/project/` | read-only | Live nanoclaw codebase (reference only) |
+| `/workspace/group/` | read-write | Your conversation memory and notes |
+
+### Build workflow
+
+**Step 1 — Read the current state**
+```bash
+cat /workspace/extra/vault/kb/implementation-status.md
+```
+Identify the next spec item marked "Not started" with the highest priority (P0 first).
+
+**Step 2 — Set up the build workspace**
+```bash
+cd /workspace/extra/work
+
+# Clone the nanoclaw repo (only if not already cloned)
+if [ ! -d "nanoclaw/.git" ]; then
+  git clone "https://oauth2:${GITHUB_TOKEN}@github.com/efteOpenclaw/nanoclaw.git" nanoclaw
+fi
+
+cd nanoclaw
+git fetch origin
+git checkout main
+git pull origin main
+```
+
+**Step 3 — Create an evolution branch**
+```bash
+BRANCH="evolution/$(date +%Y-%m-%d-%H-%M)"
+git checkout -b "$BRANCH"
+```
+
+**Step 4 — Implement**
+- Read the spec item from `/workspace/extra/vault/kb/implementation-status.md` and `implementation-status.md`'s gap table
+- Write the code in `/workspace/extra/work/nanoclaw/src/`
+- Run `npm run build` to verify — must pass cleanly before committing
+- Write a test or smoke-test if applicable
+
+**Step 5 — Commit and push**
+```bash
+cd /workspace/extra/work/nanoclaw
+git add -A
+git commit -m "feat: <spec item> (autonomous build)"
+git push "https://oauth2:${GITHUB_TOKEN}@github.com/efteOpenclaw/nanoclaw.git" "$BRANCH"
+```
+
+**Step 6 — Update implementation-status via vault write queue**
+
+Drop an IPC file to update the status:
+```bash
+echo "{
+  \"path\": \"kb/implementation-status.md\",
+  \"content\": \"\\n**$(date +%Y-%m-%d) — Autonomous build:**\\n- <what was done>\\n\",
+  \"mode\": \"append\",
+  \"priority\": \"P2\",
+  \"commitMessage\": \"build: autonomous session $(date +%Y-%m-%d)\"
+}" > /workspace/ipc/vault-writes/$(date +%s).json
+```
+
+**Step 7 — Notify via Telegram**
+Send a message to the user summarising what was built and the branch name for review.
+Use `mcp__nanoclaw__send_message` with the group JID.
+
+### Rules for autonomous builds
+
+- **Never commit directly to `main`** — always use `evolution/YYYY-MM-DD-HH-MM` branches
+- **Never touch `.env` or credentials**
+- **Always run `npm run build` and confirm it passes before committing**
+- **One spec item per build session** — don't overreach
+- **Always notify when done**, even if the build failed — explain what blocked you
+- If `GITHUB_TOKEN` is unset or `REPLACE_WITH_TOKEN`, stop and tell the user to set it
+
+### Reading the spec
+
+The full spec is at `/workspace/extra/vault/kb/implementation-status.md` (gap table + build log).
+The next item to build is always the highest-priority "Not started" or "Partial" row.
+Current position: write queue live → **next: SPEC-06 HOT/WARM/COLD memory tiers**

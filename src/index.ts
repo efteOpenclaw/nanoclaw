@@ -1,5 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import os from 'os';
 
 import {
   ASSISTANT_NAME,
@@ -606,6 +609,109 @@ async function main(): Promise<void> {
           )
           .join('\n');
         await channel.sendMessage(chatJid, `${header}\n\n${list}`);
+      }
+    },
+  });
+
+  const execAsync = promisify(exec);
+
+  registerCommand('/build', {
+    description: 'Start an autonomous build session — clones nanoclaw-work, implements next spec item, commits and pushes.',
+    mainOnly: true,
+    handle: async ({ chatJid, channel }) => {
+      await channel.sendMessage(
+        chatJid,
+        'Starting autonomous build session...\nReading implementation status and cloning repo.',
+      );
+
+      const workDir = path.join(os.homedir(), 'nanoclaw-work');
+      const repoUrl = 'https://github.com/efteOpenclaw/nanoclaw.git';
+      const branchName = `evolution/${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
+
+      try {
+        // Ensure work directory exists and is clean
+        if (fs.existsSync(workDir)) {
+          fs.rmSync(workDir, { recursive: true, force: true });
+        }
+        fs.mkdirSync(workDir, { recursive: true });
+
+        // Clone the repo
+        await channel.sendMessage(chatJid, 'Cloning nanoclaw repo...');
+        const { stdout: cloneOut, stderr: cloneErr } = await execAsync(
+          `git clone ${repoUrl} ${workDir}`,
+        );
+        logger.debug({ cloneOut, cloneErr }, 'git clone output');
+
+        // Create evolution branch
+        await channel.sendMessage(chatJid, `Creating branch: ${branchName}...`);
+        await execAsync(`git -C ${workDir} checkout -b ${branchName}`);
+
+        // Check for implementation status
+        const implStatusPath = path.join(workDir, 'nanoclaw-personal', 'docs', 'implementation-status.md');
+        let statusPreview = '';
+        if (fs.existsSync(implStatusPath)) {
+          const content = fs.readFileSync(implStatusPath, 'utf-8');
+          // Extract the "Next" section or first 20 lines
+          const lines = content.split('\n');
+          const nextIdx = lines.findIndex(l => l.toLowerCase().includes('next:'));
+          if (nextIdx >= 0) {
+            statusPreview = lines.slice(nextIdx, nextIdx + 5).join('\n');
+          }
+        }
+
+        // Install dependencies
+        await channel.sendMessage(chatJid, 'Installing dependencies...');
+        const { stdout: npmOut, stderr: npmErr } = await execAsync('npm install', { cwd: workDir });
+        logger.debug({ npmOut, npmErr }, 'npm install output');
+
+        // Build
+        await channel.sendMessage(chatJid, 'Running npm run build...');
+        const { stdout: buildOut, stderr: buildErr } = await execAsync('npm run build', { cwd: workDir });
+        logger.debug({ buildOut, buildErr }, 'npm build output');
+
+        // Commit and push (even if empty, to establish branch)
+        await channel.sendMessage(chatJid, 'Committing and pushing to origin...');
+        await execAsync(`git -C ${workDir} add -A`);
+        await execAsync(
+          `git -C ${workDir} -c user.email="okti@nanoclaw.local" -c user.name="Okti" commit -m "build: autonomous session ${branchName}" || true`,
+        );
+        await execAsync(`git -C ${workDir} push origin ${branchName}`);
+
+        // Report success
+        const msg = [
+          'Autonomous build session complete.',
+          '',
+          `Branch: \`${branchName}\``,
+          `Work dir: \`${workDir}\``,
+          statusPreview ? `\nNext spec item:\n${statusPreview}` : '',
+          '',
+          'The agent can now continue implementing from here.',
+          'Container has read-write access to /workspace/extra/work',
+        ].join('\n');
+
+        await channel.sendMessage(chatJid, msg);
+
+        // Write to vault via IPC for tracking
+        const ipcDir = path.join(os.homedir(), 'nanoclaw', 'data', 'ipc', 'main', 'vault-writes');
+        if (!fs.existsSync(ipcDir)) {
+          fs.mkdirSync(ipcDir, { recursive: true });
+        }
+        const ipcPayload = {
+          path: 'evolution/build-log.md',
+          content: `\n## ${new Date().toISOString()} — Autonomous build\n- Branch: ${branchName}\n- Status: success\n- Next: agent to continue implementation\n`,
+          mode: 'append',
+          priority: 'P2',
+          commitMessage: `evolution: build log ${branchName}`,
+        };
+        const ipcFile = path.join(ipcDir, `${crypto.randomUUID()}.json`);
+        fs.writeFileSync(ipcFile, JSON.stringify(ipcPayload, null, 2));
+
+      } catch (err) {
+        logger.error({ err }, 'autonomous build failed');
+        await channel.sendMessage(
+          chatJid,
+          `Build session failed: ${err instanceof Error ? err.message : String(err)}\nCheck logs at /tmp/nanoclaw.log`,
+        );
       }
     },
   });
