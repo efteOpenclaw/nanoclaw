@@ -12,7 +12,13 @@ import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 function settingsFilePath(groupFolder: string): string {
-  return path.join(DATA_DIR, 'sessions', groupFolder, '.claude', 'settings.json');
+  return path.join(
+    DATA_DIR,
+    'sessions',
+    groupFolder,
+    '.claude',
+    'settings.json',
+  );
 }
 
 /** Read the active model for a group. Falls back to .env ANTHROPIC_MODEL. */

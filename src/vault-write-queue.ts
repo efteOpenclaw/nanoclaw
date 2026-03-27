@@ -55,7 +55,9 @@ function resolveVaultPath(): string {
   const env = readEnvFile(['VAULT_PATH']);
   const raw = env['VAULT_PATH'];
   if (!raw) throw new Error('VAULT_PATH is not set in .env');
-  return raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : path.resolve(raw);
+  return raw.startsWith('~/')
+    ? path.join(os.homedir(), raw.slice(2))
+    : path.resolve(raw);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -84,7 +86,12 @@ class VaultWriteQueue {
     };
     this.lanes[full.priority].push(full);
     logger.debug(
-      { id: full.id, priority: full.priority, path: full.path, source: full.source },
+      {
+        id: full.id,
+        priority: full.priority,
+        path: full.path,
+        source: full.source,
+      },
       'vault-write-queue: enqueued',
     );
     if (!this.processing) {
@@ -169,20 +176,30 @@ class VaultWriteQueue {
     await this.gitCommitPush(vaultRoot, req.path, commitMsg);
   }
 
-  private validatePath(relPath: string, mode: 'overwrite' | 'append', vaultRoot: string): void {
+  private validatePath(
+    relPath: string,
+    mode: 'overwrite' | 'append',
+    vaultRoot: string,
+  ): void {
     if (!relPath || relPath.trim() === '') {
       throw new Error('vault-write-queue: path must not be empty');
     }
     if (path.isAbsolute(relPath)) {
-      throw new Error(`vault-write-queue: path must be relative, got "${relPath}"`);
+      throw new Error(
+        `vault-write-queue: path must be relative, got "${relPath}"`,
+      );
     }
     if (relPath.includes('..')) {
-      throw new Error(`vault-write-queue: path traversal detected in "${relPath}"`);
+      throw new Error(
+        `vault-write-queue: path traversal detected in "${relPath}"`,
+      );
     }
     // Ensure resolved path stays within vault
     const resolved = path.resolve(vaultRoot, relPath);
     if (!resolved.startsWith(vaultRoot + path.sep) && resolved !== vaultRoot) {
-      throw new Error(`vault-write-queue: path escapes vault root: "${relPath}"`);
+      throw new Error(
+        `vault-write-queue: path escapes vault root: "${relPath}"`,
+      );
     }
     // Additive-only protection
     if (mode === 'overwrite' && isAdditiveOnly(relPath)) {
@@ -192,7 +209,11 @@ class VaultWriteQueue {
     }
   }
 
-  private async gitCommitPush(vaultRoot: string, relPath: string, msg: string): Promise<void> {
+  private async gitCommitPush(
+    vaultRoot: string,
+    relPath: string,
+    msg: string,
+  ): Promise<void> {
     // Stage the specific file
     await execAsync(`git -C "${vaultRoot}" add "${relPath}"`);
 
@@ -202,7 +223,10 @@ class VaultWriteQueue {
     );
     if (!statusOut.trim()) {
       // File content unchanged — nothing to commit or push
-      logger.debug({ relPath }, 'vault-write-queue: no changes to commit, skipping');
+      logger.debug(
+        { relPath },
+        'vault-write-queue: no changes to commit, skipping',
+      );
       return;
     }
 

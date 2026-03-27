@@ -242,9 +242,11 @@ export class TelegramChannel implements Channel {
       const sender = ctx.from?.id.toString() ?? '';
 
       const answer: CallbackAnswerFn = async (toast?: string) => {
-        await ctx.answerCallbackQuery({ text: toast }).catch((err) =>
-          logger.debug({ err }, 'Failed to answer callback query'),
-        );
+        await ctx
+          .answerCallbackQuery({ text: toast })
+          .catch((err) =>
+            logger.debug({ err }, 'Failed to answer callback query'),
+          );
       };
 
       if (this.callbackQueryHandler) {
@@ -338,7 +340,10 @@ export class TelegramChannel implements Channel {
         parse_mode: 'Markdown',
         reply_markup: keyboard,
       });
-      logger.info({ jid, buttons: rows.flat().length }, 'Telegram keyboard message sent');
+      logger.info(
+        { jid, buttons: rows.flat().length },
+        'Telegram keyboard message sent',
+      );
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram keyboard message');
     }

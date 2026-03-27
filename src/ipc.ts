@@ -172,7 +172,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           }
         }
       } catch (err) {
-        logger.error({ err, sourceGroup }, 'Error reading IPC vault-writes directory');
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC vault-writes directory',
+        );
       }
     }
 
@@ -502,20 +505,30 @@ function processVaultWriteIpc(
   const { path: relPath, content, mode, priority, commitMessage } = data;
 
   if (typeof relPath !== 'string' || !relPath) {
-    logger.warn({ sourceGroup, data }, 'vault-write IPC: missing or invalid path');
+    logger.warn(
+      { sourceGroup, data },
+      'vault-write IPC: missing or invalid path',
+    );
     return;
   }
   if (typeof content !== 'string') {
-    logger.warn({ sourceGroup, relPath }, 'vault-write IPC: content must be a string');
+    logger.warn(
+      { sourceGroup, relPath },
+      'vault-write IPC: content must be a string',
+    );
     return;
   }
   if (typeof mode !== 'string' || !VALID_MODES.has(mode)) {
-    logger.warn({ sourceGroup, relPath, mode }, 'vault-write IPC: invalid mode');
+    logger.warn(
+      { sourceGroup, relPath, mode },
+      'vault-write IPC: invalid mode',
+    );
     return;
   }
-  const p = typeof priority === 'string' && VALID_PRIORITIES.has(priority)
-    ? (priority as VaultWritePriority)
-    : 'P2';
+  const p =
+    typeof priority === 'string' && VALID_PRIORITIES.has(priority)
+      ? (priority as VaultWritePriority)
+      : 'P2';
 
   vaultWriteQueue.enqueue({
     priority: p,
@@ -523,6 +536,7 @@ function processVaultWriteIpc(
     content,
     mode: mode as 'overwrite' | 'append',
     source: `ipc:${sourceGroup}`,
-    commitMessage: typeof commitMessage === 'string' ? commitMessage : undefined,
+    commitMessage:
+      typeof commitMessage === 'string' ? commitMessage : undefined,
   });
 }

@@ -60,7 +60,10 @@ export function isHostCommand(command: string): boolean {
  * Parse the command name and args from a slash command message.
  * e.g. "/foo bar baz" → { command: "/foo", args: "bar baz" }
  */
-export function parseSlashCommand(content: string): { command: string; args: string } {
+export function parseSlashCommand(content: string): {
+  command: string;
+  args: string;
+} {
   const trimmed = content.trim();
   const spaceIdx = trimmed.indexOf(' ');
   if (spaceIdx === -1) {
@@ -77,7 +80,9 @@ export function parseSlashCommand(content: string): { command: string; args: str
  * Returns true if the command was handled (caller should not forward to container).
  * Returns false if no handler is registered (caller should pass through to container).
  */
-export async function dispatchSlashCommand(ctx: CommandContext): Promise<boolean> {
+export async function dispatchSlashCommand(
+  ctx: CommandContext,
+): Promise<boolean> {
   const cmd = registry.get(ctx.command);
   if (!cmd) return false;
 
@@ -97,7 +102,9 @@ export async function dispatchSlashCommand(ctx: CommandContext): Promise<boolean
     await cmd.handle(ctx);
   } catch (err) {
     logger.error({ err, command: ctx.command }, 'slash-command handler error');
-    await ctx.channel.sendMessage(ctx.chatJid, `${ctx.command} failed: ${err}`).catch(() => {});
+    await ctx.channel
+      .sendMessage(ctx.chatJid, `${ctx.command} failed: ${err}`)
+      .catch(() => {});
   }
 
   return true;
@@ -110,6 +117,9 @@ export function listCommands(): string {
   if (registry.size === 0) return 'No host-side commands registered.';
   const lines = Array.from(registry.entries())
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, cmd]) => `${name}${cmd.mainOnly ? ' (main only)' : ''} — ${cmd.description}`);
+    .map(
+      ([name, cmd]) =>
+        `${name}${cmd.mainOnly ? ' (main only)' : ''} — ${cmd.description}`,
+    );
   return lines.join('\n');
 }
