@@ -344,6 +344,32 @@ export class GroupQueue {
     }
   }
 
+  /**
+   * Return a snapshot of all currently active containers.
+   * Used by the internal status API (port 3001) for the Command Center.
+   */
+  getActiveContainers(): Array<{
+    groupJid: string;
+    containerName: string | null;
+    pid: number | null;
+  }> {
+    const result: Array<{
+      groupJid: string;
+      containerName: string | null;
+      pid: number | null;
+    }> = [];
+    for (const [groupJid, state] of this.groups) {
+      if (state.active) {
+        result.push({
+          groupJid,
+          containerName: state.containerName ?? null,
+          pid: state.process?.pid ?? null,
+        });
+      }
+    }
+    return result;
+  }
+
   async shutdown(_gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 

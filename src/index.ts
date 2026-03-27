@@ -1,8 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import os from 'os';
+import http from 'http';
+import crypto from 'crypto';
 
 import {
   ASSISTANT_NAME,
@@ -46,6 +48,9 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  getPendingProposals,
+  getLatestTokenUsagePerGroup,
+  logTokenUsage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { readEnvFile } from './env.js';
@@ -87,7 +92,10 @@ import {
   parsePromotionResponse,
   handlePromotionResponse,
 } from './memory-promotion.js';
-import { processContainerOutput, createFlushRequestIpc } from './token-monitor.js';
+import {
+  processContainerOutput,
+  createFlushRequestIpc,
+} from './token-monitor.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -98,7 +106,9 @@ function resolveVaultRoot(): string | null {
     const env = readEnvFile(['VAULT_PATH']);
     const raw = env['VAULT_PATH'];
     if (!raw) return null;
-    return raw.startsWith('~/') ? path.join(os.homedir(), raw.slice(2)) : path.resolve(raw);
+    return raw.startsWith('~/')
+      ? path.join(os.homedir(), raw.slice(2))
+      : path.resolve(raw);
   } catch {
     return null;
   }
@@ -378,18 +388,42 @@ async function runAgent(
         }
         // Token monitoring: parse output for token counts, trigger flush at floor
         if (output.result) {
-          const raw = typeof output.result === 'string' ? output.result : JSON.stringify(output.result);
-          const { threshold } = processContainerOutput(chatJid, raw);
+          const raw =
+            typeof output.result === 'string'
+              ? output.result
+              : JSON.stringify(output.result);
+          const { tokens, threshold } = processContainerOutput(chatJid, raw);
+          if (tokens !== null) {
+            logTokenUsage({
+              group_id: chatJid,
+              tokens_used: threshold.tokensUsed,
+              tokens_remaining: threshold.tokensRemaining,
+              approaching: threshold.approaching,
+              exceeded: threshold.exceeded,
+              should_flush: threshold.shouldFlush,
+            });
+          }
           if (threshold.shouldFlush) {
             const vaultRoot = resolveVaultRoot();
             if (vaultRoot) {
               const flushReq = createFlushRequestIpc(chatJid);
-              logger.warn({ chatJid, tokensUsed: threshold.tokensUsed }, 'Token floor hit — pre-compaction flush requested');
+              logger.warn(
+                { chatJid, tokensUsed: threshold.tokensUsed },
+                'Token floor hit — pre-compaction flush requested',
+              );
               // Write flush request to IPC so agent can respond with context summary
-              const ipcDir = path.join(process.cwd(), 'data', 'ipc', 'flush-requests');
+              const ipcDir = path.join(
+                process.cwd(),
+                'data',
+                'ipc',
+                'flush-requests',
+              );
               fs.mkdirSync(ipcDir, { recursive: true });
               fs.writeFileSync(
-                path.join(ipcDir, `${chatJid.replace(/[^a-z0-9]/gi, '_')}.json`),
+                path.join(
+                  ipcDir,
+                  `${chatJid.replace(/[^a-z0-9]/gi, '_')}.json`,
+                ),
                 JSON.stringify(flushReq),
               );
             }
@@ -560,6 +594,119 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
+// =============================================================================
+// SPEC-07: Command Center internal status API (port 3001, loopback only)
+// =============================================================================
+
+let statusServer: http.Server | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ccProcess: ReturnType<typeof spawn> | null = null;
+
+function startStatusApi(): void {
+  statusServer = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', 'http://localhost:3000');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method !== 'GET') {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Method not allowed' }));
+      return;
+    }
+
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+
+    try {
+      switch (url.pathname) {
+        case '/health': {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+          break;
+        }
+
+        case '/status': {
+          const groups = getAllRegisteredGroups();
+          const allSessions = getAllSessions();
+          const tasks = getAllTasks();
+          const containers = queue.getActiveContainers();
+          const tokenSnapshots = getLatestTokenUsagePerGroup();
+          const pendingProposals = getPendingProposals();
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              groups,
+              sessions: allSessions,
+              tasks,
+              containers,
+              tokenSnapshots,
+              pendingProposals,
+              timestamp: Date.now(),
+            }),
+          );
+          break;
+        }
+
+        case '/stream': {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+
+          const sendUpdate = () => {
+            try {
+              const groups = getAllRegisteredGroups();
+              const allSessions = getAllSessions();
+              const tasks = getAllTasks();
+              const containers = queue.getActiveContainers();
+              const tokenSnapshots = getLatestTokenUsagePerGroup();
+              const pendingProposals = getPendingProposals();
+
+              const payload = JSON.stringify({
+                groups,
+                sessions: allSessions,
+                tasks,
+                containers,
+                tokenSnapshots,
+                pendingProposals,
+                timestamp: Date.now(),
+              });
+              res.write(`data: ${payload}\n\n`);
+            } catch (err) {
+              logger.error({ err }, 'SSE update error');
+            }
+          };
+
+          sendUpdate();
+          const interval = setInterval(sendUpdate, 5000);
+          req.on('close', () => clearInterval(interval));
+          break;
+        }
+
+        default: {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not found' }));
+        }
+      }
+    } catch (err) {
+      logger.error({ err, path: url.pathname }, 'Status API error');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    }
+  });
+
+  statusServer.listen(3001, '127.0.0.1', () => {
+    logger.info('Status API listening on 127.0.0.1:3001');
+  });
+}
+
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
@@ -575,12 +722,16 @@ async function main(): Promise<void> {
         'HOT memory loaded',
       );
     } catch (err) {
-      logger.warn({ err }, 'HOT memory not yet initialised — will create on first write');
+      logger.warn(
+        { err },
+        'HOT memory not yet initialised — will create on first write',
+      );
     }
   }
 
   await runStartupValidator();
   loadState();
+  startStatusApi();
   restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)
@@ -593,6 +744,8 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     proxyServer.close();
+    if (statusServer) statusServer.close();
+    if (ccProcess && !ccProcess.killed) ccProcess.kill('SIGTERM');
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -855,9 +1008,15 @@ async function main(): Promise<void> {
           const vaultRoot = resolveVaultRoot();
           if (vaultRoot) {
             const ch = findChannel(channels, chatJid);
-            handlePromotionResponse(promoResponse.proposalId, promoResponse.accepted, vaultRoot)
+            handlePromotionResponse(
+              promoResponse.proposalId,
+              promoResponse.accepted,
+              vaultRoot,
+            )
               .then((result) => ch?.sendMessage(chatJid, result.message))
-              .catch((err) => logger.error({ err }, 'Promotion response handler failed'));
+              .catch((err) =>
+                logger.error({ err }, 'Promotion response handler failed'),
+              );
             return; // Do not pass to container
           }
         }
@@ -932,13 +1091,15 @@ async function main(): Promise<void> {
       lastPromotionScanDate = today;
       const vaultRoot = resolveVaultRoot();
       if (!vaultRoot) return;
-      const mainEntry = Object.entries(registeredGroups).find(([, g]) => g.isMain);
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain,
+      );
       if (!mainEntry) return;
       const [mainJid] = mainEntry;
       const ch = findChannel(channels, mainJid);
       if (!ch) return;
-      runDailyPromotionScan(vaultRoot, getAgentName(), ch, mainJid).catch((err) =>
-        logger.error({ err }, 'Daily promotion scan failed'),
+      runDailyPromotionScan(vaultRoot, getAgentName(), ch, mainJid).catch(
+        (err) => logger.error({ err }, 'Daily promotion scan failed'),
       );
     }
   }, 60_000); // check every minute
@@ -995,6 +1156,135 @@ async function main(): Promise<void> {
       }
     },
   });
+  // SPEC-07: Command Center slash commands
+  registerCommand('/build-command-center', {
+    description: 'Start the Command Center UI on localhost:3000.',
+    mainOnly: true,
+    handle: async ({ chatJid, channel }) => {
+      if (ccProcess && !ccProcess.killed) {
+        await channel.sendMessage(
+          chatJid,
+          'Command Center is already running on http://localhost:3000',
+        );
+        return;
+      }
+
+      const ccDir = path.join(process.cwd(), 'command-center');
+
+      if (!fs.existsSync(path.join(ccDir, 'package.json'))) {
+        await channel.sendMessage(
+          chatJid,
+          'Command Center not found at command-center/. Run npm install there first.',
+        );
+        return;
+      }
+
+      await channel.sendMessage(chatJid, 'Starting Command Center...');
+
+      ccProcess = spawn('npx', ['next', 'dev', '--port', '3000'], {
+        cwd: ccDir,
+        stdio: 'pipe',
+        detached: false,
+        env: {
+          ...process.env,
+          NANOCLAW_STORE_PATH: path.join(process.cwd(), 'store', 'messages.db'),
+          NANOCLAW_STATUS_API: 'http://127.0.0.1:3001',
+        },
+      });
+
+      ccProcess.stderr?.on('data', (data: Buffer) => {
+        const line = data.toString().trim();
+        if (line) logger.debug({ source: 'cc' }, line);
+      });
+
+      ccProcess.on('exit', (code: number | null) => {
+        logger.info({ code }, 'Command Center process exited');
+        ccProcess = null;
+      });
+
+      setTimeout(async () => {
+        if (ccProcess && !ccProcess.killed) {
+          await channel.sendMessage(
+            chatJid,
+            'Command Center running at http://localhost:3000',
+          );
+        } else {
+          await channel.sendMessage(
+            chatJid,
+            'Command Center failed to start. Check logs.',
+          );
+        }
+      }, 3000);
+    },
+  });
+
+  registerCommand('/cc-stop', {
+    description: 'Stop the Command Center.',
+    mainOnly: true,
+    handle: async ({ chatJid, channel }) => {
+      if (!ccProcess || ccProcess.killed) {
+        await channel.sendMessage(chatJid, 'Command Center is not running.');
+        return;
+      }
+      ccProcess.kill('SIGTERM');
+      ccProcess = null;
+      await channel.sendMessage(chatJid, 'Command Center stopped.');
+    },
+  });
+
+  registerCommand('/cc-external', {
+    description:
+      'Enable external access to Command Center with JWT auth. Posts URL to chat.',
+    mainOnly: true,
+    handle: async ({ chatJid, channel }) => {
+      if (!ccProcess || ccProcess.killed) {
+        await channel.sendMessage(
+          chatJid,
+          'Start the CC first with /build-command-center.',
+        );
+        return;
+      }
+
+      const envPath = path.join(process.cwd(), '.env');
+      let envContent = '';
+      try {
+        envContent = fs.readFileSync(envPath, 'utf-8');
+      } catch {
+        /* no .env yet */
+      }
+
+      let jwtSecret: string;
+      const existingMatch = envContent.match(/^CC_JWT_SECRET=(.+)$/m);
+      if (existingMatch) {
+        jwtSecret = existingMatch[1];
+      } else {
+        jwtSecret = crypto.randomBytes(32).toString('hex');
+        fs.appendFileSync(envPath, `\nCC_JWT_SECRET=${jwtSecret}\n`);
+      }
+
+      if (!envContent.includes('CC_EXTERNAL=true')) {
+        fs.appendFileSync(envPath, 'CC_EXTERNAL=true\n');
+      }
+
+      const token = crypto
+        .createHmac('sha256', jwtSecret)
+        .update(`cc-access:${Date.now()}`)
+        .digest('hex');
+
+      await channel.sendMessage(
+        chatJid,
+        [
+          'External access enabled.',
+          '',
+          `URL: http://<your-server-ip>:3000?token=${token}`,
+          '',
+          'JWT auth is active. This token expires in 24h.',
+          'To disable, restart CC without /cc-external.',
+        ].join('\n'),
+      );
+    },
+  });
+
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

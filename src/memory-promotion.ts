@@ -25,6 +25,12 @@ import {
 } from './memory-occurrence-tracker.js';
 import { loadHotMemory, appendToHotMemory } from './memory-tier-manager.js';
 import type { Channel } from './types.js';
+import {
+  createProposal as dbCreateProposal,
+  getProposalById as dbGetProposalById,
+  getPendingProposals as dbGetPendingProposals,
+  updateProposalStatus,
+} from './db.js';
 
 export interface PromotionProposal {
   id: string;
@@ -35,9 +41,6 @@ export interface PromotionProposal {
   proposedAt: string;
   agentName: string;
 }
-
-// In-memory store for pending proposals (cleared on restart)
-const pendingProposals = new Map<string, PromotionProposal>();
 
 /**
  * Generate a unique proposal ID
@@ -145,7 +148,10 @@ export async function scanForPromotions(
       // Find source content
       const source = findWarmContent(vaultRoot, agentName, term);
       if (!source) {
-        logger.warn({ term, agentName }, 'Could not find source content for promotion');
+        logger.warn(
+          { term, agentName },
+          'Could not find source content for promotion',
+        );
         continue;
       }
 
@@ -160,7 +166,15 @@ export async function scanForPromotions(
       };
 
       proposals.push(proposal);
-      pendingProposals.set(proposal.id, proposal);
+      dbCreateProposal({
+        id: proposal.id,
+        agent_name: proposal.agentName,
+        term: proposal.term,
+        source_path: proposal.sourcePath,
+        source_content: proposal.sourceContent,
+        occurrence_count: proposal.occurrenceCount,
+        proposed_at: proposal.proposedAt,
+      });
 
       logger.info(
         { proposalId: proposal.id, term, count: check.totalOccurrences },
@@ -214,17 +228,34 @@ export async function handlePromotionResponse(
   accepted: boolean,
   vaultRoot: string,
 ): Promise<{ success: boolean; message: string }> {
-  const proposal = pendingProposals.get(proposalId);
+  const row = dbGetProposalById(proposalId);
 
-  if (!proposal) {
+  if (!row) {
     return {
       success: false,
       message: `Proposal ${proposalId} not found or expired.`,
     };
   }
 
+  if (row.status !== 'pending') {
+    return {
+      success: false,
+      message: `Proposal ${proposalId} already ${row.status}.`,
+    };
+  }
+
+  const proposal: PromotionProposal = {
+    id: row.id,
+    agentName: row.agent_name,
+    term: row.term,
+    sourcePath: row.source_path,
+    sourceContent: row.source_content,
+    occurrenceCount: row.occurrence_count,
+    proposedAt: row.proposed_at,
+  };
+
   if (!accepted) {
-    pendingProposals.delete(proposalId);
+    updateProposalStatus(proposalId, 'rejected');
     logger.info({ proposalId }, 'Promotion rejected by user');
     return {
       success: true,
@@ -251,12 +282,9 @@ export async function handlePromotionResponse(
       `mem: promote "${proposal.term}" to HOT`,
     );
 
-    pendingProposals.delete(proposalId);
+    updateProposalStatus(proposalId, 'accepted');
 
-    logger.info(
-      { proposalId, term: proposal.term },
-      'Promoted to HOT memory',
-    );
+    logger.info({ proposalId, term: proposal.term }, 'Promoted to HOT memory');
 
     return {
       success: true,
@@ -345,7 +373,16 @@ export function parsePromotionResponse(
  * Get all pending proposals for an agent
  */
 export function getPendingProposals(agentName: string): PromotionProposal[] {
-  return Array.from(pendingProposals.values()).filter(
-    (p) => p.agentName === agentName,
-  );
+  return dbGetPendingProposals()
+    .filter((r) => r.agent_name === agentName)
+    .map((r) => ({
+      id: r.id,
+      agentName: r.agent_name,
+      term: r.term,
+      sourcePath: r.source_path,
+      sourceContent: r.source_content,
+      occurrenceCount: r.occurrence_count,
+      proposedAt: r.proposed_at,
+    }));
 }
+

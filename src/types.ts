@@ -151,3 +151,28 @@ export type OnChatMetadata = (
   channel?: string,
   isGroup?: boolean,
 ) => void;
+
+// SPEC-06: Promotion proposal DB row
+export interface PromotionProposalRow {
+  id: string;
+  agent_name: string;
+  term: string;
+  source_path: string;
+  source_content: string;
+  occurrence_count: number;
+  proposed_at: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  responded_at: string | null;
+}
+
+// SPEC-06: Token usage log DB row
+export interface TokenUsageLogRow {
+  id: number;
+  group_id: string;
+  tokens_used: number;
+  tokens_remaining: number;
+  approaching: number;
+  exceeded: number;
+  should_flush: number;
+  recorded_at: string;
+}

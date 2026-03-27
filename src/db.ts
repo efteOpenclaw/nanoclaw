@@ -167,6 +167,44 @@ function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_embeddings_path ON embeddings(vault_path)
   `);
+
+  // SPEC-06: Promotion proposals (persistent across restarts)
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS promotion_proposals (
+      id TEXT PRIMARY KEY,
+      agent_name TEXT NOT NULL,
+      term TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      source_content TEXT NOT NULL,
+      occurrence_count INTEGER NOT NULL,
+      proposed_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      responded_at TEXT
+    )
+  `);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_proposals_status ON promotion_proposals(status)
+  `);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_proposals_proposed_at ON promotion_proposals(proposed_at)
+  `);
+
+  // SPEC-06: Token usage logs
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS token_usage_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id TEXT NOT NULL,
+      tokens_used INTEGER NOT NULL,
+      tokens_remaining INTEGER NOT NULL,
+      approaching INTEGER NOT NULL DEFAULT 0,
+      exceeded INTEGER NOT NULL DEFAULT 0,
+      should_flush INTEGER NOT NULL DEFAULT 0,
+      recorded_at TEXT NOT NULL
+    )
+  `);
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_token_logs_group ON token_usage_logs(group_id, recorded_at)
+  `);
 }
 
 export function initDatabase(): void {
@@ -856,4 +894,117 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   }
 
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// =============================================================================
+// Promotion proposal accessors (SPEC-06)
+// =============================================================================
+
+import type { PromotionProposalRow, TokenUsageLogRow } from './types.js';
+
+export function createProposal(
+  proposal: Omit<PromotionProposalRow, 'status' | 'responded_at'>,
+): void {
+  db.prepare(`
+    INSERT INTO promotion_proposals
+      (id, agent_name, term, source_path, source_content, occurrence_count, proposed_at, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+  `).run(
+    proposal.id,
+    proposal.agent_name,
+    proposal.term,
+    proposal.source_path,
+    proposal.source_content,
+    proposal.occurrence_count,
+    proposal.proposed_at,
+  );
+}
+
+export function getProposalById(id: string): PromotionProposalRow | undefined {
+  return db
+    .prepare('SELECT * FROM promotion_proposals WHERE id = ?')
+    .get(id) as PromotionProposalRow | undefined;
+}
+
+export function getPendingProposals(): PromotionProposalRow[] {
+  return db
+    .prepare(
+      "SELECT * FROM promotion_proposals WHERE status = 'pending' ORDER BY proposed_at DESC",
+    )
+    .all() as PromotionProposalRow[];
+}
+
+export function getAllProposals(limit: number = 50): PromotionProposalRow[] {
+  return db
+    .prepare(
+      'SELECT * FROM promotion_proposals ORDER BY proposed_at DESC LIMIT ?',
+    )
+    .all(limit) as PromotionProposalRow[];
+}
+
+export function updateProposalStatus(
+  id: string,
+  status: 'accepted' | 'rejected',
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE promotion_proposals SET status = ?, responded_at = ? WHERE id = ?',
+  ).run(status, now, id);
+}
+
+// =============================================================================
+// Token usage log accessors (SPEC-06)
+// =============================================================================
+
+export function logTokenUsage(entry: {
+  group_id: string;
+  tokens_used: number;
+  tokens_remaining: number;
+  approaching: boolean;
+  exceeded: boolean;
+  should_flush: boolean;
+}): void {
+  db.prepare(`
+    INSERT INTO token_usage_logs
+      (group_id, tokens_used, tokens_remaining, approaching, exceeded, should_flush, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.group_id,
+    entry.tokens_used,
+    entry.tokens_remaining,
+    entry.approaching ? 1 : 0,
+    entry.exceeded ? 1 : 0,
+    entry.should_flush ? 1 : 0,
+    new Date().toISOString(),
+  );
+}
+
+export function getTokenUsageLogs(
+  groupId?: string,
+  limit: number = 100,
+): TokenUsageLogRow[] {
+  if (groupId) {
+    return db
+      .prepare(
+        'SELECT * FROM token_usage_logs WHERE group_id = ? ORDER BY recorded_at DESC LIMIT ?',
+      )
+      .all(groupId, limit) as TokenUsageLogRow[];
+  }
+  return db
+    .prepare('SELECT * FROM token_usage_logs ORDER BY recorded_at DESC LIMIT ?')
+    .all(limit) as TokenUsageLogRow[];
+}
+
+export function getLatestTokenUsagePerGroup(): TokenUsageLogRow[] {
+  return db
+    .prepare(`
+      SELECT t1.* FROM token_usage_logs t1
+      INNER JOIN (
+        SELECT group_id, MAX(recorded_at) as max_recorded
+        FROM token_usage_logs
+        GROUP BY group_id
+      ) t2 ON t1.group_id = t2.group_id AND t1.recorded_at = t2.max_recorded
+      ORDER BY t1.group_id
+    `)
+    .all() as TokenUsageLogRow[];
 }
